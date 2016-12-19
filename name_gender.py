@@ -17,7 +17,8 @@ from sklearn.metrics import mean_squared_error
 
 import re
 
-ALLOWED = re.compile(r'^[-a-zA-ZåäöÅÄÖ]+$')
+#ALLOWED = re.compile(r'^[-a-zA-ZåäöÅÄÖ]+$')
+ALLOWED = re.compile(r'^[a-zA-ZåäöÅÄÖ]+$')
 
 # if both men and women have a name but one of them have it 10x (or
 # MORE_COMMON_THRESH times) more commonly, consider it that gender's
@@ -77,6 +78,7 @@ def group_of_name(name):
 def build_model():
     print('Build model...')
     model = Sequential()
+    act = 'relu'
     model.add(GRU(128, input_shape=(GLO.max_len, len(GLO.chars)), activation=act, dropout_W=.3, dropout_U=.3, return_sequences=True))
     model.add(GRU(128, dropout_W=.3, dropout_U=.3))
     model.add(Dense(2, activation='sigmoid'))
