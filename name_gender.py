@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 
-from keras.models import Sequential, load_model
-from keras.layers import Dense, Activation, Dropout
-from keras.layers import LSTM, GRU, Bidirectional
-from keras.optimizers import RMSprop, Adadelta, Adam
-from keras.utils.data_utils import get_file
 from keras import backend as K
-import numpy as np
-import random
-import sys
-import pandas as pd
-from keras.wrappers.scikit_learn import KerasRegressor
 from keras.callbacks import ModelCheckpoint, TensorBoard, CSVLogger
-from zlib import adler32
+from keras.engine.topology import merge
+from keras.layers import Dense, Activation, Dropout, Input, LSTM, GRU, Bidirectional
+from keras.layers.core import Reshape, Lambda
+from keras.models import Sequential, load_model, Model
+from keras.optimizers import RMSprop, Adadelta, Adam
+from keras.regularizers import l2
+from keras.utils.data_utils import get_file
+from keras.wrappers.scikit_learn import KerasRegressor
 from sklearn.metrics import mean_squared_error
-
+from zlib import adler32
+import h5py
+import numpy as np
+import pandas as pd
+import random
 import re
+import sys
 
 #ALLOWED = re.compile(r'^[-a-zA-ZåäöÅÄÖ]+$')
 ALLOWED = re.compile(r'^[a-zA-ZåäöÅÄÖ]+$')
@@ -32,6 +34,7 @@ MALE_IDX = 0
 FEMALE_IDX = 1
 
 MAX_EPOCHS = 200
+HIDDEN_SIZE = 128
 
 global GLO
 
@@ -75,20 +78,53 @@ def group_of_name(name):
     return adler32(name.encode('utf-8')) % NUM_SPLITS
 
 # build the model: a single LSTM
-def build_model():
+def build_model(activations=False):
     print('Build model...')
-    model = Sequential()
+    inp = Input(shape=(GLO.max_len, len(GLO.chars)), name='input')
     act = 'relu'
-    model.add(GRU(128, input_shape=(GLO.max_len, len(GLO.chars)), activation=act, dropout_W=.3, dropout_U=.3, return_sequences=True))
-    model.add(GRU(128, dropout_W=.3, dropout_U=.3))
-    model.add(Dense(2, activation='sigmoid'))
+    gru_input = GRU(HIDDEN_SIZE, input_shape=(GLO.max_len, len(GLO.chars)), activation=act, dropout_W=.3, dropout_U=.3, W_regularizer=l1(), b_regularizer=l1(), return_sequences=True, name='gru_input')(inp)
+    gru_hidden = GRU(HIDDEN_SIZE, dropout_W=.3, dropout_U=.3, W_regularizer=l1(), b_regularizer=l1(), name='gru_hidden', return_sequences=activations)(gru_input)
+    if activations:
+        # drop anything but the final layer's activations
+        gru_hidden_all = gru_hidden
+        gru_hidden = Lambda(lambda x: x[:,-1,:])(gru_hidden_all)
+    output = Dense(2, activation='sigmoid', W_regularizer=l1(), b_regularizer=l1(), name='output')(gru_hidden)
 
     #optimizer = RMSprop(lr=0.01)
     #optimizer = Adadelta()
     #optimizer = Adam(lr=0.01)
     optimizer = 'nadam'
+    if activations:
+        output = merge([#Reshape((GLO.max_len*len(GLO.chars),))(inp),
+                        Reshape((GLO.max_len*HIDDEN_SIZE,))(gru_input),
+                        Reshape((GLO.max_len*HIDDEN_SIZE,))(gru_hidden_all),
+                        output], mode='concat')
+        #for i in range(GLO.max_len):
+        #    for j in range(len(GLO.chars)):
+        #        columns.append('input_seq{}_char{}'.format(i, j))
+        for i in range(GLO.max_len):
+            for j in range(HIDDEN_SIZE):
+                columns.append('gru_input_seq{}_node{}'.format(i, j))
+        for i in range(GLO.max_len):
+            for j in range(HIDDEN_SIZE):
+                columns.append('gru_hidden_seq{}_node{}'.format(i, j))
+    model = Model(input=inp, output=output)
     model.compile(loss='binary_crossentropy', optimizer=optimizer)
     return model
+
+def rename_layers():
+    load_data()
+    model = build_model()
+    for group in range(NUM_SPLITS):
+        fname = 'model_group{}.h5'.format(group)
+        model.load_weights(fname)
+        model.save(fname)
+
+def vectorize_name(s):
+    a = np.zeros((GLO.max_len, len(GLO.chars)), dtype=np.bool)
+    for i, char in enumerate(s):
+        a[i][GLO.char_indices[char]] = 1
+    return a
 
 def load_data():
     GLO.male_dic = load_names('male.csv')
@@ -134,12 +170,11 @@ def load_data():
     GLO.X = np.zeros((len(GLO.all_names), GLO.max_len, len(GLO.chars)), dtype=np.bool)
     GLO.y = np.zeros((len(GLO.all_names), 2), dtype=np.bool)
     for i, name in enumerate(sorted(GLO.all_names)):
-        for j, char in enumerate(name):
-            GLO.X[i][j][GLO.char_indices[char]] = 1
+        GLO.X[i] = vectorize_name(name)
         if name in GLO.male:
-            GLO.y[i][MALE_IDX] = 1
+            GLO.y[i, MALE_IDX] = 1
         if name in GLO.female:
-            GLO.y[i][FEMALE_IDX] = 1
+            GLO.y[i, FEMALE_IDX] = 1
 
     # split into NUM_SPLITS groups, deterministically based on the name
     GLO.group_nums = np.array([group_of_name(x) for x in sorted(GLO.all_names)])
@@ -188,6 +223,55 @@ def predict():
     data.to_csv('pred.csv', index=False)
     print(data)
 
+def get_activations(group):
+    load_data()
+    model = build_model(activations=True)
+    model.load_weights('model_group{}.h5'.format(group), by_name=True)
+    y = model.predict_on_batch(GLO.X)
+
+    names = np.array([x.encode('utf-8') for x in sorted(GLO.all_names)], np.bytes_)
+
+    hid = GLO.max_len*HIDDEN_SIZE
+    n = len(y)
+    assert y.shape[1] >= hid
+    gru_input = y[:, :hid].reshape((n, GLO.max_len, HIDDEN_SIZE))
+    y = y[:, hid:]
+    assert y.shape[1] >= hid
+    gru_hidden = y[:, :hid].reshape((n, GLO.max_len, HIDDEN_SIZE))
+    y = y[:, hid:]
+    assert y.shape == (n, 2)
+    output = y
+
+    hdf = h5py.File('activations.h5', 'w', compression='gzip')
+    hdf.create_dataset('names', data=names)
+    hdf.create_dataset('gru_input', data=gru_input)
+    hdf.create_dataset('gru_hidden', data=gru_hidden)
+    hdf.create_dataset('output', data=output)
+    hdf.close()
+
+def predict_stdin():
+    load_data()
+    model = build_model()
+    names = [x for x in sys.stdin.read().strip().lower().splitlines() if len(x) < GLO.max_len and ALLOWED.match(x)]
+    X = np.array([vectorize_name(x) for x in names], dtype=bool)
+
+    preds = np.zeros((len(names), NUM_SPLITS, 2))
+
+    for group in range(NUM_SPLITS):
+        model.load_weights('model_group{}.h5'.format(group))
+        y = model.predict_on_batch(X)
+        preds[:, group] = y
+
+    np.set_printoptions(suppress=True)
+
+    for name, p in zip(names, preds):
+        print('{:s}: mean={} std={}'.format(name, p.mean(axis=0), p.std(axis=0)))
+        print(p)
+        print()
+
 if __name__ == '__main__':
-    #train()
-    predict()
+    train()
+    #predict()
+    #predict_stdin()
+    #get_activations(0)
+    #rename_layers()
