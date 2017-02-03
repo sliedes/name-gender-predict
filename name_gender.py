@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
 from keras import backend as K
-from keras.callbacks import ModelCheckpoint, TensorBoard, CSVLogger
+from keras.callbacks import ModelCheckpoint, TensorBoard, CSVLogger, EarlyStopping
 from keras.engine.topology import merge
 from keras.layers import Dense, Activation, Dropout, Input, LSTM, GRU, Bidirectional
 from keras.layers.core import Reshape, Lambda
 from keras.models import Sequential, load_model, Model
 from keras.optimizers import RMSprop, Adadelta, Adam
-from keras.regularizers import l2
+from keras.regularizers import l1
 from keras.utils.data_utils import get_file
 from keras.wrappers.scikit_learn import KerasRegressor
 from sklearn.metrics import mean_squared_error
@@ -19,7 +19,11 @@ import random
 import re
 import sys
 
+# Disallow names with a hyphen, since it feels like cheating to
+# predict gender for Emma-Lotta when you know the gender for Emma and
+# Lotta.
 #ALLOWED = re.compile(r'^[-a-zA-ZåäöÅÄÖ]+$')
+
 ALLOWED = re.compile(r'^[a-zA-ZåäöÅÄÖ]+$')
 
 # if both men and women have a name but one of them have it 10x (or
@@ -35,6 +39,9 @@ FEMALE_IDX = 1
 
 MAX_EPOCHS = 200
 HIDDEN_SIZE = 128
+
+L1_PARAM = 4e-5
+DROPOUT = 0.2
 
 global GLO
 
@@ -82,26 +89,28 @@ def build_model(activations=False):
     print('Build model...')
     inp = Input(shape=(GLO.max_len, len(GLO.chars)), name='input')
     act = 'relu'
-    gru_input = GRU(HIDDEN_SIZE, input_shape=(GLO.max_len, len(GLO.chars)), activation=act, dropout_W=.3, dropout_U=.3, W_regularizer=l1(), b_regularizer=l1(), return_sequences=True, name='gru_input')(inp)
-    gru_hidden = GRU(HIDDEN_SIZE, dropout_W=.3, dropout_U=.3, W_regularizer=l1(), b_regularizer=l1(), name='gru_hidden', return_sequences=activations)(gru_input)
+    gru_input = GRU(HIDDEN_SIZE, input_shape=(GLO.max_len, len(GLO.chars)), activation=act,
+                    dropout_W=DROPOUT, dropout_U=DROPOUT,
+                    W_regularizer=l1(L1_PARAM), U_regularizer=l1(L1_PARAM),
+                    return_sequences=True, name='gru_input')(inp)
+    gru_hidden = GRU(HIDDEN_SIZE, dropout_W=DROPOUT, dropout_U=DROPOUT,
+                     W_regularizer=l1(L1_PARAM), U_regularizer=l1(L1_PARAM),
+                     name='gru_hidden', return_sequences=activations)(gru_input)
     if activations:
         # drop anything but the final layer's activations
         gru_hidden_all = gru_hidden
         gru_hidden = Lambda(lambda x: x[:,-1,:])(gru_hidden_all)
-    output = Dense(2, activation='sigmoid', W_regularizer=l1(), b_regularizer=l1(), name='output')(gru_hidden)
+    output = Dense(2, activation='sigmoid', W_regularizer=l1(L1_PARAM),
+                   name='output')(gru_hidden)
 
     #optimizer = RMSprop(lr=0.01)
     #optimizer = Adadelta()
     #optimizer = Adam(lr=0.01)
     optimizer = 'nadam'
     if activations:
-        output = merge([#Reshape((GLO.max_len*len(GLO.chars),))(inp),
-                        Reshape((GLO.max_len*HIDDEN_SIZE,))(gru_input),
+        output = merge([Reshape((GLO.max_len*HIDDEN_SIZE,))(gru_input),
                         Reshape((GLO.max_len*HIDDEN_SIZE,))(gru_hidden_all),
                         output], mode='concat')
-        #for i in range(GLO.max_len):
-        #    for j in range(len(GLO.chars)):
-        #        columns.append('input_seq{}_char{}'.format(i, j))
         for i in range(GLO.max_len):
             for j in range(HIDDEN_SIZE):
                 columns.append('gru_input_seq{}_node{}'.format(i, j))
@@ -201,8 +210,9 @@ def train():
             filepath="model_group" + str(val_group) + "_e{epoch:04d}-{val_loss:.4f}.h5",
             monitor='val_loss', verbose=1, save_best_only=True)
         logger = CSVLogger('group{}_train.csv'.format(val_group))
+        stopper = EarlyStopping(monitor='val_loss', patience=12)
         reg.fit(GLO.X[train], GLO.y[train], validation_data=(GLO.X[validate], GLO.y[validate]),
-                callbacks=[checkpointer, logger, TensorBoard(log_dir='tensorboard{}'.format(val_group))])
+                callbacks=[checkpointer, logger, stopper, TensorBoard(log_dir='tensorboard{}'.format(val_group))])
 
 def predict():
     load_data()
@@ -270,8 +280,13 @@ def predict_stdin():
         print()
 
 if __name__ == '__main__':
-    train()
-    #predict()
-    #predict_stdin()
-    #get_activations(0)
-    #rename_layers()
+    if '--train' in sys.argv:
+        train()
+    elif '--predict' in sys.argv:
+        predict()
+    elif '--predict-stdin' in sys.argv:
+        predict_stdin()
+    elif '--get-activations' in sys.argv:
+        get_activations(0)
+    else:
+        print('Need one of --train --predict --predict-stdin --get-activations.')
