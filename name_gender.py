@@ -7,7 +7,6 @@ from keras.layers import Dense, Activation, Dropout, Input, LSTM, GRU, Bidirecti
 from keras.layers.core import Reshape, Lambda
 from keras.models import Sequential, load_model, Model
 from keras.optimizers import RMSprop, Adadelta, Adam
-from keras.regularizers import l1
 from keras.utils.data_utils import get_file
 from keras.wrappers.scikit_learn import KerasRegressor
 from sklearn.metrics import mean_squared_error
@@ -40,7 +39,6 @@ FEMALE_IDX = 1
 MAX_EPOCHS = 200
 HIDDEN_SIZE = 128
 
-L1_PARAM = 4e-5
 DROPOUT = 0.2
 
 global GLO
@@ -91,16 +89,14 @@ def build_model(activations=False):
     act = 'relu'
     gru_input = GRU(HIDDEN_SIZE, input_shape=(GLO.max_len, len(GLO.chars)), activation=act,
                     dropout_W=DROPOUT, dropout_U=DROPOUT,
-                    W_regularizer=l1(L1_PARAM), U_regularizer=l1(L1_PARAM),
                     return_sequences=True, name='gru_input')(inp)
     gru_hidden = GRU(HIDDEN_SIZE, dropout_W=DROPOUT, dropout_U=DROPOUT,
-                     W_regularizer=l1(L1_PARAM), U_regularizer=l1(L1_PARAM),
                      name='gru_hidden', return_sequences=activations)(gru_input)
     if activations:
         # drop anything but the final layer's activations
         gru_hidden_all = gru_hidden
         gru_hidden = Lambda(lambda x: x[:,-1,:])(gru_hidden_all)
-    output = Dense(2, activation='sigmoid', W_regularizer=l1(L1_PARAM),
+    output = Dense(2, activation='sigmoid',
                    name='output')(gru_hidden)
 
     #optimizer = RMSprop(lr=0.01)
